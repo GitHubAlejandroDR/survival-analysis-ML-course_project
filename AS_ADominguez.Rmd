@@ -1,0 +1,2239 @@
+---
+title: "Análisis de supervivencia + ML"
+author: "Alejandro Domínguez Recio"
+date: '2022-11-23'
+output: html_document
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = F, warning = F, message = F)
+```
+
+## __Librerias__
+
+```{r, echo=T}
+# Nombres de libreries
+packages <- c("TCGAretriever", "RTCGAToolbox", "discretization", "survival", "survminer", "nloptr", "ggpubr", "ggplot2", "ggsurvfit", "DT", "tidyverse", "stringr", "randomForest", "glmnet", "nnet", "e1071", "htmltools", "caret", "superml", "CORElearn", "ROCR", "mice")
+
+# Instala paquetes que no están ya instaladas
+installed_packages <- packages %in% rownames(installed.packages())
+if (any(installed_packages == FALSE)) {
+  install.packages(packages[!installed_packages], force=T)
+}
+
+# Carga paquetes
+invisible(lapply(packages, library, character.only = TRUE))
+```
+
+## __Datos__
+
+__Descripción de los datos:__
+
+- 1.097 filas
+
+Variables de estudio
+
+- Edad (years_to_birth)
+- Evento (vital_status)
+- Días hasta muerte (days_to_death)
+- Días hasta última revisión (days_to_last_followup)
+- Lugar del tumor (tumor_tissue_site)
+- Estado (pathologic_stage)
+- Estado patológico T (pathology_T_stage)
+- Estado patológico N (pathology_M_stage)
+- Estado patológico M (pathology_M_stage)
+- Fecha del diagnóstico inicial (date_of_initial_pathologic_diagnosis)
+- Tiempo (days_to_last_known_alive)
+- Radioterápia (radiation_therapy)
+- Tipo histológico (histological_type)
+- Número de ganglios afectados (number_of_lymph_nodes)
+- Raza (race)
+- Etnia (ethnicity)
+
+__Eliminamos del conjunto de datos las variables:__
+- Género (gender)
+- Radioterápia (radiation_therapy)
+- Composite Element REF
+- Sitio del tumor (tumor_tissue_site)
+
+### __Tabla Datos__
+
+```{r}
+load(file = "E:/Asignaturas/HAB/AnalysisSurvival/exercise2/brcaData")
+df <- getData(brcaData, "clinical")
+del.vars <- match(c("Composite Element REF", "tumor_tissue_site", "radiation_therapy", "gender"), colnames(df))
+df <- df[,-(del.vars)]
+datatable(df)
+```
+
+```{r echo=FALSE}
+setwd("E:/Asignaturas/HAB/AnalysisSurvival/exercise2")
+# save(conf.ls.1,conf.ls.2,conf.ls.3,conf.nn.1,conf.nn.2,conf.nn.3,conf.rf.1,conf.rf.2,conf.rf.3,conf.svm.3,conf.svm.2,conf.svm.1, file="confResults.Rdata")
+```
+
+```{r echo=FALSE}
+load(file="confResults.Rdata")
+```
+
+# __Descriptiva__
+
+### Summary
+
+```{r}
+summary(df)
+```
+
+__Realizamos las siguientes transformaciones de tipo:__
+
+De character a factor:
+
+- Estado (pathologic_stage)
+- Estado patológico T (pathology_T_stage)
+- Estado patológico N (pathology_M_stage)
+- Estado patológico M (pathology_M_stage)
+- Tipo histológico (histological_type)
+- Raza (race)
+- Etnia (ethnicity)
+
+De character a integer:
+
+- Edad (years_to_birth)
+- Evento (vital_status)
+- Días hasta muerte (days_to_death)
+- Días hasta última revisión (days_to_last_followup)
+- Fecha del diagnóstico inicial (date_of_initial_pathologic_diagnosis)
+- Tiempo (days_to_last_known_alive)
+- Número de ganglios afectados (number_of_lymph_nodes)
+
+
+```{r}
+df$pathologic_stage <- as.factor(df$pathologic_stage)
+df$pathology_T_stage <- as.factor(df$pathology_T_stage)
+df$pathology_N_stage <- as.factor(df$pathology_N_stage)
+df$pathology_M_stage <- as.factor(df$pathology_M_stage)
+df$histological_type <- as.factor(df$histological_type)
+df$race <- as.factor(df$race)
+df$ethnicity <- as.factor(df$ethnicity)
+
+df$vital_status <- as.numeric(df$vital_status)
+df$years_to_birth <- as.numeric(df$years_to_birth)
+df$days_to_death <- as.numeric(df$days_to_death)
+df$days_to_last_followup <- as.numeric(df$days_to_last_followup)
+df$date_of_initial_pathologic_diagnosis <- as.numeric(df$date_of_initial_pathologic_diagnosis)
+df$number_of_lymph_nodes <- as.numeric(df$number_of_lymph_nodes)
+```
+
+
+### Null values
+
+```{r}
+barplot(colSums(is.na(df)), las=2)
+```
+
+Los valores nulos se concentran en las variables que determinan el comienzo, fin y tiempo total de las observaciones en el estudio. La variable tiempo se obtendrá a partir de las variables comienzo y fin de la observación en el estudio. Por lo tanto el porcentaje de valores nulos en la variable tiempo será recalculado posteriormente. Una vez obtenida la variable tiempo, las variables comienzo y fin no tendrán influencia sobre los análisis y serán suprimidas. A su vez existe un pequeño porcentaje de valores nulos en las variables número de gánglios afectados, raza y etnia. Debido al pequeño porcentaje de valores nulos en este ultimo grupo el efecto sobre el análisis será mínimo y no se tratará mediante ninguna técnica de imputación, se omitirán dichas observaciones.
+
+
+## __Calculo tiempo de supervivencia__
+
+```{r, echo=T}
+df$days_to_last_known_alive <- df$days_to_death
+df$days_to_last_known_alive[c(which(is.na(df$days_to_death)))] <- df$days_to_last_followup[c(which(is.na(df$days_to_death)))]
+df$days_to_last_known_alive <- as.numeric(df$days_to_last_known_alive)
+df <- df[,-(match(c("days_to_death", "days_to_last_followup"), colnames(df)))]
+```
+
+Una vez calculada el tiempo de supervivencia observamos que se siguen manteniendo las 1097 observaciones iniciales. Eliminamos las varibles Días hasta muerte (days_to_death) y Días hasta última revisión (days_to_last_followup) ya que no son necesarias para los futuros análisis.
+
+```{r, echo=TRUE}
+dim.data.frame(df)
+```
+
+Posteriormente eliminamos las observaciones con valores nulos y volvemos a comprobar las dimensiones de los datos. 
+
+```{r, echo=T}
+df <- na.omit(df)
+dim.data.frame(df)
+```
+De un total de 1097 observaciones, tras eliminar los valores nulos nos quedamos con 822.
+
+## __Análisis descriptivo__
+
+Descriptiva de las variables de estudio: edad, estado, tiempo de
+seguimiento, T, N, M, año de diagnóstico, tipo histológico, número de
+ganglios afectados, raza y etnia.
+
+### __Edad__
+
+__Summary__
+
+```{r}
+summary(df$years_to_birth)
+```
+
+__Histograma__
+
+```{r}
+hist(df$years_to_birth, main = "Histogram of years_to_birth", xlab = "years_to_birth")
+```
+
+### __Estado__
+
+__Summary__
+
+```{r}
+summary(df$pathologic_stage)
+```
+
+__Barplot__
+
+```{r}
+barplot(table(df$pathologic_stage), las=2)
+```
+
+### __Tiempo de seguimiento__
+
+
+__Summary__
+
+```{r}
+summary(df$days_to_last_known_alive)
+```
+
+__Histograma__
+
+```{r}
+hist(df$days_to_last_known_alive, main = "Histogram of days_to_last_known_alive", xlab = "days_to_last_known_alive")
+```
+
+
+### __T__
+
+__Summary__
+
+```{r}
+summary(df$pathology_T_stage)
+```
+
+__Barplot__
+
+```{r}
+barplot(table(df$pathology_T_stage), las=2)
+```
+
+### __N__
+
+__Summary__
+
+```{r}
+summary(df$pathology_N_stage)
+```
+
+__Barplot__
+
+```{r}
+barplot(table(df$pathology_M_stage), las=2)
+```
+
+### __M__
+
+__Summary__
+
+```{r}
+summary(df$pathology_M_stage)
+```
+
+__Barplot__
+
+```{r}
+barplot(table(df$pathology_M_stage), las=2)
+```
+
+### __Año de diagnóstico__
+
+__Summary__
+
+```{r}
+summary(df$date_of_initial_pathologic_diagnosis)
+```
+
+__Histograma__
+
+```{r}
+hist(df$date_of_initial_pathologic_diagnosis, main = "Histogram of date_of_initial_pathologic_diagnosis", xlab = "date_of_initial_pathologic_diagnosis")
+```
+
+### __Tipo histologico__
+
+__Summary__
+
+```{r}
+summary(df$histological_type)
+```
+__Barplot__
+
+```{r}
+barplot(table(df$histological_type), las=2)
+```
+
+
+### __Número de gánglios afectados__
+
+__Summary__
+
+```{r}
+summary(df$number_of_lymph_nodes)
+```
+__Histograma__
+
+```{r}
+hist(df$number_of_lymph_nodes, main = "Histogram of Number_of_lymph_nodes", xlab = "Number_of_lymph_nodes")
+```
+
+### __Raza__
+
+__Summary__
+
+```{r}
+summary(df$race)
+```
+
+__Barplot__
+
+```{r}
+barplot(table(df$race), las=2)
+```
+
+### __Etnia__
+
+__Summary__
+
+```{r}
+summary(df$ethnicity)
+```
+
+__Barplot__
+
+```{r}
+barplot(table(df$ethnicity), las=2)
+```
+
+
+## __Calculo variable Estadio__
+
+Se calculará el estadio del tumor (I,II,III y IV) a partir de la
+estadificación TNM
+
+**Rangos:** 
+
+- Stage I = Stage i, Stage ia, Stage ib 
+- Stage II = Stage ii, Stage iib 
+- Stage III = Stage iii, Stage iiia, Stage iiib, Stage iiic 
+- Stage IV = Stage iv, Stage x
+
+**Valores distintos pathologic_state (estado patológico):**
+
+```{r}
+unique(df$pathologic_stage)
+```
+
+### Definición tipos estadios por el sistema TNM
+
+-   Stage 0 = Tis, N0, M0
+-   Stage IA = T1, N0, M0
+-   Stage IB = T0 o T1, N1, M0
+-   Stage IIA = (T0, N1, M0) o (T1, N1, M0) o (T2, N0, M0)
+-   Stage IIB = (T2, N1, M0) o (T3, N0, M0)
+-   Stage IIIA = (T0, T1, T2) o (T3, N2, M0) o (T3, N1, M0)
+-   Stage IIIB = (T4; N0, N1 o N2; M0)
+-   Stage IIIC = (cualquier T, N3, M0)
+-   Stage IV = (cualquier T, cualquier N, M1)
+
+La definición de los diferentes estadios viene determinada por las categorias superiores de las variables T,N,M. Eliminamos las subcategorias dentro de las variables T,N,M.
+
+**Valores distintos T_stage (estado del tumor):**
+
+```{r}
+unique(df$pathology_T_stage)
+```
+
+**Valores distintos N_stage (estado de los ganglios):**
+
+```{r}
+unique(df$pathology_N_stage)
+```
+
+**Valores distintos M_stage (estado de metástasis):**
+
+```{r}
+unique(df$pathology_M_stage)
+```
+
+Nos fijamos que las categorias superiores están definidas con los dos primeros carácteres. Por esto, seleccionamos los dos primeros carácteres y eliminamos el resto. Exceptuamos el caso de la subcategoria "cm0 (i+)" contenida en la variable M, que deberá de ser tratada de una forma distinta.
+
+```{r}
+df$pathology_T_stage <- substr(df$pathology_T_stage, start = 1, stop = 2)
+df$pathology_N_stage <- substr(df$pathology_N_stage, start = 1, stop = 2)
+df$pathology_M_stage[df$pathology_M_stage == "cm0 (i+)"] <- "m0"
+df$pathology_M_stage <- substr(df$pathology_M_stage, start = 1, stop = 2)
+```
+
+Otro aspecto a tener en cuenta es el procesado de aquellas observaciones en las que la categorías asociada sea indeterminada. En este caso se ha optado por suprimir las observaciones que cumplan dicha característica.
+
+```{r}
+df <- df[df$pathology_N_stage != "nx",]
+df <- df[df$pathology_T_stage != "tx",]
+df <- df[df$pathology_M_stage != "mx",]
+df$pathology_T_stage <- as.factor(df$pathology_T_stage)
+df$pathology_N_stage <- as.factor(df$pathology_N_stage)
+df$pathology_M_stage <- as.factor(df$pathology_M_stage)
+```
+
+Volvemos a visualizar las categorias contenidas en las variables T,N,M.
+
+**Valores distintos T_stage (estado del tumor):**
+
+```{r}
+unique(df$pathology_T_stage)
+```
+
+**Valores distintos N_stage (estado de los ganglios):**
+
+```{r}
+unique(df$pathology_N_stage)
+```
+
+**Valores distintos M_stage (estado de metástasis):**
+
+```{r}
+unique(df$pathology_M_stage)
+```
+
+Tras procesar las subcategorias dentro de las variables T,N,M pasamos a determinar los distintos estadios en base al sistema TNM.
+
+```{r, echo=TRUE}
+# Crear variable stage. 
+df$stage <- vector(mode = "character", length = length(df$pathologic_stage))
+# Definir "stage i"
+## Stage IA
+df$stage[which((df$pathology_T_stage == "t1") & (df$pathology_N_stage == "n0") & (df$pathology_M_stage == "m0"))] <- "stage i"
+## Stage IB
+df$stage[which((df$pathology_T_stage == "t1") & (df$pathology_N_stage == "n1") & (df$pathology_M_stage == "m0"))] <- "stage i"
+df$stage[which((df$pathology_T_stage == "t0") & (df$pathology_N_stage == "n1") & (df$pathology_M_stage == "m0"))] <- "stage i"
+# Definir "stage ii"
+## Stage IIA
+df$stage[which((df$pathology_T_stage == "t0") & (df$pathology_N_stage == "n1") & (df$pathology_M_stage == "m0"))] <- "stage ii"
+df$stage[which((df$pathology_T_stage == "t1") & (df$pathology_N_stage == "n1") & (df$pathology_M_stage == "m0"))] <- "stage ii"
+df$stage[which((df$pathology_T_stage == "t2") & (df$pathology_N_stage == "n0") & (df$pathology_M_stage == "m0"))] <- "stage ii"
+## Stage IIB
+df$stage[which((df$pathology_T_stage == "t2") & (df$pathology_N_stage == "n1") & (df$pathology_M_stage == "m0"))] <- "stage ii"
+df$stage[which((df$pathology_T_stage == "t3") & (df$pathology_N_stage == "n0") & (df$pathology_M_stage == "m0"))] <- "stage ii"
+# Definir "stage iii"
+## Stage IIIA
+df$stage[which((df$pathology_T_stage == "t0") & (df$pathology_N_stage == "n2") & (df$pathology_M_stage == "m0"))] <- "stage iii"
+df$stage[which((df$pathology_T_stage == "t1") & (df$pathology_N_stage == "n2") & (df$pathology_M_stage == "m0"))] <- "stage iii"
+df$stage[which((df$pathology_T_stage == "t2") & (df$pathology_N_stage == "n2") & (df$pathology_M_stage == "m0"))] <- "stage iii"
+df$stage[which((df$pathology_T_stage == "t3") & (df$pathology_N_stage == "n2") & (df$pathology_M_stage == "m0"))] <- "stage iii"
+df$stage[which((df$pathology_T_stage == "t3") & (df$pathology_N_stage == "n1") & (df$pathology_M_stage == "m0"))] <- "stage iii"
+## Stage IIIB
+df$stage[which((df$pathology_T_stage == "t4") & (df$pathology_N_stage == "n0") & (df$pathology_M_stage == "m0"))] <- "stage iii"
+df$stage[which((df$pathology_T_stage == "t4") & (df$pathology_N_stage == "n1") & (df$pathology_M_stage == "m0"))] <- "stage iii"
+df$stage[which((df$pathology_T_stage == "t4") & (df$pathology_N_stage == "n2") & (df$pathology_M_stage == "m0"))] <- "stage iii"
+## Stage IIIC
+df$stage[which((df$pathology_T_stage == "t0") & (df$pathology_N_stage == "n3") & (df$pathology_M_stage == "m0"))] <- "stage iii"
+df$stage[which((df$pathology_T_stage == "t1") & (df$pathology_N_stage == "n3") & (df$pathology_M_stage == "m0"))] <- "stage iii"
+df$stage[which((df$pathology_T_stage == "t2") & (df$pathology_N_stage == "n3") & (df$pathology_M_stage == "m0"))] <- "stage iii"
+df$stage[which((df$pathology_T_stage == "t3") & (df$pathology_N_stage == "n3") & (df$pathology_M_stage == "m0"))] <- "stage iii"
+df$stage[which((df$pathology_T_stage == "t4") & (df$pathology_N_stage == "n3") & (df$pathology_M_stage == "m0"))] <- "stage iii"
+# Definir "stage iv"
+## Stage IV
+df$stage[which(df$pathology_M_stage == "m1")] <- "stage iv"
+# Cambiar el tipo de character a factor
+df$stage <- as.factor(df$stage)
+```
+
+### __Analisis descriptivo Estadio__
+
+__Summary__
+
+```{r}
+summary(df$stage)
+```
+
+__Barplot__
+
+```{r}
+barplot(table(df$stage), las=2)
+```
+
+
+## __Calculo variable Nodos afectados__
+
+El calculo de la variable nodo ha sido realizada en base a lo recomendado en la literatura (American Society of Clinical Oncology (ASCO),s.f).
+
+**Rangos:** 
+
+- NO = No existen nodos afectados 
+- N1 = Existen entre 1 y 3 nodos afectados 
+- N2 = Existen entre 4 y 9 nodos afectados 
+- N3 = Más de 10 nodos afectados
+
+*Mantenemos la variable nodos continua con el fin de probar diferentes interavalos y calcular el p-valor asociado al test de Log-rank.
+
+```{r}
+df$number_of_lymph_nodes <- as.numeric(df$number_of_lymph_nodes)
+df$number_of_lymph_nodes_n <- df$number_of_lymph_nodes
+df$number_of_lymph_nodes <- cut(df$number_of_lymph_nodes, breaks = c(0,1,4,10, 1000), labels = c("N0", "N1", "N2", "N3"), right = F)
+```
+
+### __Análisis descriptivo Nodos afectados__
+
+__Summary__
+
+```{r}
+summary(df$number_of_lymph_nodes)
+```
+
+__Barplot__
+
+```{r}
+barplot(table(df$number_of_lymph_nodes), las=2)
+```
+
+```{r}
+# df$pathologic_stage <- as.factor(df$pathologic_stage)
+# df$pathology_T_stage <- as.factor(df$pathology_T_stage)
+# df$pathology_N_stage <- as.factor(df$pathology_N_stage)
+# df$pathology_M_stage <- as.factor(df$pathology_M_stage)
+# df$histological_type <- as.factor(df$histological_type)
+# df$race <- as.factor(df$race)
+# df$ethnicity <- as.factor(df$ethnicity)
+# 
+# df$years_to_birth <- as.numeric(df$years_to_birth)
+# # df$days_to_death <- as.numeric(df$days_to_death)
+# # df$days_to_last_followup <- as.numeric(df$days_to_last_followup)
+# df$date_of_initial_pathologic_diagnosis <- as.numeric(df$date_of_initial_pathologic_diagnosis)
+# df$number_of_lymph_nodes <- as.numeric(df$number_of_lymph_nodes)
+```
+
+
+# __Curvas de supervivencia__
+
+## __Curva 1__
+
+### Estimación de curvas de supervivencia global (OS) para la población completa. Incluir intervalos de confianza, tabla con eventos y análisis de algún que otro parámetro gráfico.
+
+#### __Surfit__
+
+```{r}
+# Kaplan Meier estimador de supervivencia
+fit <- survfit(Surv(df$days_to_last_known_alive, as.numeric(df$vital_status)) ~ 1, data=df)
+fit
+```
+
+#### __Head summary__
+
+```{r}
+head(surv_summary(fit))
+```
+
+#### __Estimación supervivencia día 8605__
+
+```{r}
+summary(survfit(Surv(df$days_to_last_known_alive, as.numeric(df$vital_status)) ~ 1, data=df), times = 8605)
+```
+
+
+#### __Plot Kaplan Meier__
+
+```{r}
+survfit2(Surv(df$days_to_last_known_alive, as.numeric(df$vital_status)) ~ 1, data=df) %>% 
+  ggsurvfit() +
+  labs(
+    x = "Days",
+    y = "Overall survival probability"
+    ) + 
+  add_confidence_interval() +
+  add_risktable() +
+  add_censor_mark()
+```
+
+__Observaciones:__
+
+- La probabilidad de supervivencia media para la población completa, teniendo en cuenta el total de variables, es de 3945 días.
+- En el instante de tiempo 8605 días, la probabilidad de supervivencia es de 0.271 
+- En el periodo de tiempo [0,3500] días se concentran la mayoría de las observaciones censuradas y eventos registrados. 
+- La caía de las observaciones debido a los observaciones censuradas y eventos registrados en el periodo de tiempo [0,3500] provoca un aumento de los intervalos de confianza en el periodo de tiempo [3500, 8605].
+
+## __Curva 2__
+
+### Estimación de curvas de supervivencia global para grupos de pacientes estratificados por los diferentes grupos de las variables de estudio.
+
+### __Calculo variable Edad__
+
+La discretización de la variable Edad (years_to_birth) se ha realizado mediante ChiMerge. 
+
+Rangos obtenidos para la variable Edad, a partir de ChiMerge.
+
+```{r, echo=T}
+df.birth <- df[,(match(c("years_to_birth", "vital_status"), colnames(df)))]
+chiM.years <- chiM(df.birth, alpha = 0.05)
+chiM.years$cutp
+```
+
+Aplicamos la discretización obtenida.
+
+```{r}
+df$years_to_birth_a <- cut(df$years_to_birth, breaks = c(0,35.5, 37.5 ,40.5, 67.5, 69.5, 71.5,150), labels = c("[0,35.5)", "[35.5,37.5)", "[37.5, 40.5)", "[40.5, 67.5)", "[67.5, 69.5)", "[69.5, 71.5)", "[71.5, ~)"))
+```
+
+Calculamos el pvalor asociado al test de Log-rank.
+
+```{r}
+survdiff(Surv(df$days_to_last_known_alive, as.numeric(df$vital_status)) ~ years_to_birth_a, data=df)
+```
+
+Probamos una segunda discretización y comparamos su pvalor asociado al test de Log-rank con la primera discretización.
+
+```{r}
+df$years_to_birth_b <- cut(df$years_to_birth, breaks = c(0,25,50,75, 150), labels = c("[0,25)", "[25,50)", "[50, 75)", "[75, ~)"))
+```
+
+```{r}
+survdiff(Surv(df$days_to_last_known_alive, as.numeric(df$vital_status)) ~ years_to_birth_b, data=df)
+```
+
+Comprobamos que las curvas asociadas a la primera discretización tienen una mayor significancia estadística. Aplicamos la primera discretización a la variable Edad.
+
+```{r}
+df$years_to_birth <- df$years_to_birth_a
+df <- df[,-(match(c("years_to_birth_a", "years_to_birth_b"), colnames(df)))]
+```
+
+#### __Plot Kaplan Meier__
+
+```{r}
+survfit2(Surv(df$days_to_last_known_alive, as.numeric(df$vital_status)) ~ years_to_birth, data=df) %>% 
+  ggsurvfit() +
+  labs(
+    x = "Days",
+    y = "Overall survival probability"
+    ) + 
+  add_confidence_interval() +
+  add_risktable() +
+  add_censor_mark()
+```
+
+
+#### __Surfit__
+
+```{r}
+survfit(Surv(df$days_to_last_known_alive, as.numeric(df$vital_status)) ~ years_to_birth, data=df)
+```
+
+__Observaciones:__
+
+- El número de observaciones muestra que el número de diagnósticos no es proporcional a la edad de los pacientes 
+- El número de eventos registrados muestra que existe una relación entre estos y la edad de los pacientes. A mayor edad mas eventos se han producido. 
+- La diferencia de supervivencia en las categorias [0, 35.5) y [71.5, ~) es de 1101 días en supervivencia media y de 264 día en el 0.95LCL.
+
+
+### __T__
+
+#### __Plot Kaplan Meier__
+
+```{r}
+survfit2(Surv(df$days_to_last_known_alive, as.numeric(df$vital_status)) ~ pathology_T_stage, data=df) %>% 
+  ggsurvfit() +
+  labs(
+    x = "Days",
+    y = "Overall survival probability"
+    ) + 
+  add_confidence_interval() +
+  add_risktable()+
+  add_censor_mark()
+```
+
+#### __Surfit__
+
+```{r}
+survfit(Surv(df$days_to_last_known_alive, as.numeric(df$vital_status)) ~ pathology_T_stage, data=df)
+```
+
+__Observaciones:__
+
+- La probabilidad de supervivencia media muestra una influencia en base al tamaño del tumor. No obstante la diferencia entre las categorias T1 y T3 es mínima. Entre las categorias T1 y T4 observamos una diferencia de supervivencia media de 2832 días.
+- El número de observaciones de las categorías T4 y T3 provoca que los intervalos de confianza de estas sean más altos. Se destaca en la categoria T4 que tras 2500 días se registraron el total de observaciones con eventos y aproximademente el 90% de las observaciones censuradas.
+
+### __N__
+
+#### __Plot Kaplan Meier__
+
+```{r}
+survfit2(Surv(df$days_to_last_known_alive, as.numeric(df$vital_status)) ~ pathology_N_stage, data=df) %>% 
+  ggsurvfit() +
+  labs(
+    x = "Days",
+    y = "Overall survival probability"
+    ) + 
+  add_confidence_interval() +
+  add_risktable()+
+  add_censor_mark() + add_pvalue()
+```
+
+
+#### __Surfit__
+
+```{r}
+survfit(Surv(df$days_to_last_known_alive, as.numeric(df$vital_status)) ~ pathology_N_stage, data=df)
+```
+
+__Observaciones:__
+
+- La probabilidad de supervivencia media muestra una influencia en base al número de ganglios afectados. La diferencia entre las distintas categorias es notable (min 500 días por 0.95LCL).
+- El número de observaciones muestra que la categoria más común es N0 y la que menos N3. Es decir el diagnóstico más común es el de un paciente con pocos ganglios afectados y el diagnóstico menos común es aquel con muchos ganglios afectados.
+- El porcentaje de eventos registrados para las categorias N3 y N2, en el instante de tiempo 2500 días, muestra que las categorías N4 y N3 ya han experimentado el 90% de los casos. 
+
+### __M__
+
+#### __Plot Kaplan Meier__
+
+```{r}
+survfit2(Surv(df$days_to_last_known_alive, as.numeric(df$vital_status)) ~ pathology_M_stage, data=df) %>% 
+  ggsurvfit() +
+  labs(
+    x = "Days",
+    y = "Overall survival probability"
+    ) + 
+  add_confidence_interval() +
+  add_risktable() +
+  add_censor_mark()
+```
+
+#### __Surfit__
+
+```{r}
+survfit(Surv(df$days_to_last_known_alive, as.numeric(df$vital_status)) ~ pathology_M_stage, data=df)
+```
+
+__Observaciones:__
+
+- La probabilidad de supervivencia media muestra una influencia en base a la presencia de metástasis. La diferencia entre las distintas categorias es notable (min 3115 días en supervivencia media).
+- El número de observaciones muestra que la categoria más común es M0, representando el 97,9% de las observaciones. Es decir el diagnóstico más común es el de un paciente sin metástasis y el diagnóstico menos común es aquel con presencia de metástasis.
+- Destacamos que el total de las observaciones censuradas se encuentran dentro de los pacientes sin metástasis. Es decir practicamente la totalidad de pacientes diagnósticados de metástasis se ha producido el evento durante el tiempo del estudio. 
+
+### __Tipo histológico__
+
+#### __Plot Kaplan Meier__
+
+```{r}
+survfit2(Surv(df$days_to_last_known_alive, as.numeric(df$vital_status)) ~ histological_type, data=df) %>% 
+  ggsurvfit() +
+  labs(
+    x = "Days",
+    y = "Overall survival probability"
+    ) + 
+  add_confidence_interval() +
+  add_risktable()
+```
+
+#### __Surfit__
+
+```{r}
+survfit(Surv(df$days_to_last_known_alive, as.numeric(df$vital_status)) ~ histological_type, data=df)
+```
+
+__Observaciones:__
+
+- La probabilidad de supervivencia media no muestra una influencia clara en base a tipo histológico del carcinoma. No obstante destacamos las categorías infiltrating ductal carcinoma y mucinous carcinoma con mayor y menor supervivencia media respectivamente. 
+- El número de observaciones muestra que la categoria más común es infiltrating ductal carcinoma, representando el 74,3% de las observaciones y infiltrating carcinoma nos la que menos, presente en un 0.1% de las observaciones.
+
+### __Número de ganglios afectados__
+
+#### __Plot Kaplan Meier__
+
+```{r}
+survfit2(Surv(df$days_to_last_known_alive, as.numeric(df$vital_status)) ~ number_of_lymph_nodes, data=df) %>% 
+  ggsurvfit() +
+  labs(
+    x = "Days",
+    y = "Overall survival probability"
+    ) + 
+  add_confidence_interval() +
+  add_risktable() +
+  add_censor_mark()
+```
+
+#### __Surfit__
+
+```{r}
+survfit(Surv(df$days_to_last_known_alive, as.numeric(df$vital_status)) ~ number_of_lymph_nodes, data=df)
+```
+
+__Observaciones:__
+
+- La probabilidad de supervivencia media muestra una influencia en base al número de ganglios afectados. La diferencia entre las categorias N0 y N4 es notable (4108 días en supervivencia media)
+- El número de observaciones muestra que la categoria más común es N0 y la que menos N4. Es decir el diagnóstico más común es el de un paciente con pocos ganglios afectados y el diagnóstico menos común es aquel con muchos ganglios afectados.
+
+### __Raza__
+
+#### __Plot Kaplan Meier__
+
+```{r}
+survfit2(Surv(df$days_to_last_known_alive, as.numeric(df$vital_status)) ~ race, data=df) %>% 
+  ggsurvfit() +
+  labs(
+    x = "Days",
+    y = "Overall survival probability"
+    ) + 
+  add_confidence_interval() +
+  add_risktable()
+```
+
+#### __Surfit__
+
+```{r}
+survfit(Surv(df$days_to_last_known_alive, as.numeric(df$vital_status)) ~ race, data=df)
+```
+
+__Observaciones:__
+
+- La probabilidad de supervivencia media no muestra una influencia en base a la raza del paciente. La diferencia entre las categorias black or african american y white es mínima (394 días en supervivencia media)
+- El número de observaciones muestra que la raza más común es white y la que menos asian. 
+
+### __Etnia__
+
+#### __Plot Kaplan Meier__
+
+```{r}
+survfit2(Surv(df$days_to_last_known_alive, as.numeric(df$vital_status)) ~ ethnicity, data=df) %>% 
+  ggsurvfit() +
+  labs(
+    x = "Days",
+    y = "Overall survival probability"
+    ) + 
+  add_confidence_interval() +
+  add_risktable()
+```
+
+#### __Surfit__
+
+```{r}
+survfit(Surv(df$days_to_last_known_alive, as.numeric(df$vital_status)) ~ ethnicity, data=df)
+```
+
+__Observaciones:__
+
+- Debido al número bajo número de observaciones de la categoria hispanic or latino no se puede hacer un análisis fiable.
+- La categoria not hispanic or latino al contener la mayoría de las observaciones la probabilidad de supervivencia es similar a la obtenida para la población completa, con una media de supervivencia de 3941 días.
+
+### __Curvas de supervivencia complejas__
+
+Mostraremos curvas de supervivencia usando la combinación de varias variables de estudio.
+
+#### __Número de ganglios afectados + M__
+
+```{r}
+curv.compl.1 <- survfit(Surv(df$days_to_last_known_alive, as.numeric(df$vital_status)) ~ number_of_lymph_nodes + pathology_M_stage, data=df)
+```
+
+#### __Survival Curves__
+
+```{r}
+ggsurv <- ggsurvplot(curv.compl.1, conf.int = TRUE,
+                     ggtheme = theme_bw())
+   
+ggsurv$plot +theme_bw() + 
+  theme (legend.position = "right")+
+  facet_grid(number_of_lymph_nodes ~ pathology_M_stage)
+```
+
+__Observaciones:__
+
+- EL número de nodos disminuye la probabilidad de supervivencia incluso en aquellos pacientes que no presentan metástasis.
+- La presencia de metástasis disminuye la probabilidad de supervivencia incluso en aquellos pacientes con un número de nodos afectado bajo (N1). 
+- Se observa una clara diferencia en la supervivencia entre aquellos pacientes con un mismo número de nodos afectados, pero con presencia de metástasis.
+
+
+#### __Número de ganglios afectados + T__
+
+```{r}
+curv.compl.2 <- survfit(Surv(df$days_to_last_known_alive, as.numeric(df$vital_status)) ~ pathology_T_stage + number_of_lymph_nodes , data=df)
+```
+
+#### __Survival curves__
+
+```{r}
+ggsurv <- ggsurvplot(curv.compl.2, conf.int = TRUE,
+                     ggtheme = theme_bw())
+   
+ggsurv$plot +theme_bw() + 
+  theme (legend.position = "right")+
+  facet_grid(pathology_T_stage ~ number_of_lymph_nodes)
+```
+
+__Observaciones:__
+
+- Tanto el número de nodos, como el tamaño del tumor tiene un claro efecto en el empeoramiento del prognóstico de la supervivencia.
+- La coexistencia de las categorias T2,N1 es la combinación que presente mejor supervivencia media, 6593 días. Por el contrario, la coexistencia de las categorias T4,N0 es la combinación que presente peor supervivencia media, 740 días.
+- A mismo número de nodos afectados, el tamaño del tumor es inversamente proporcional a la supervivencia media.
+
+#### __Etnia + T__
+
+```{r}
+curv.compl.3 <- survfit(Surv(df$days_to_last_known_alive, as.numeric(df$vital_status)) ~ race + pathology_T_stage, data=df)
+```
+
+#### __Surfit__
+
+```{r}
+ggsurv <- ggsurvplot(curv.compl.3, conf.int = TRUE,
+                     ggtheme = theme_bw())
+   
+ggsurv$plot +theme_bw() + 
+  theme (legend.position = "right")+
+  facet_grid(race ~ pathology_T_stage)
+```
+
+__Observaciones:__
+
+- Independientemente de raza, el tamaño del tumor disminuye la probabilidad de supervivencia.
+- La supervivencia media más alta se encuentra en aquellos pacientes race=white y t=t2. Por el contrario la supervivencia media más baja se encuentra en aquellos pacientes race=black or african american y t=t4. En este último caso, a igualdad de tamaño del tumor en paciente race=white, la supervivencia media asciende a 1642 días.
+
+## __Curva 3__
+
+### Estimación de curvas de supervivencia para los diferentes estadios calculados a partir del TNM.
+
+### __Estadio__
+
+#### __Plot Kaplan Meier__
+
+```{r}
+survfit2(Surv(df$days_to_last_known_alive, as.numeric(df$vital_status)) ~ stage, data=df) %>% 
+  ggsurvfit() +
+  labs(
+    x = "Days",
+    y = "Overall survival probability"
+    ) + 
+  add_confidence_interval() +
+  add_risktable() + 
+  add_censor_mark()
+```
+
+#### __Surfit__
+
+```{r}
+survfit(Surv(df$days_to_last_known_alive, as.numeric(df$vital_status)) ~ stage, data=df)
+```
+
+__Observaciones:__
+
+- La probabilidad de supervivencia media muestra una influencia en base al estadio del carcinoma. La diferencia entre las distintas categorias es notable (mín 806 días de supervivencia media).
+- El número de observaciones muestra que la categoria más común es Stage ii y la que menos Stage iv. 
+- El número de eventos registrados en el instante de tiempo 2500 días muestra una relación proporcional entre el número de eventos y el estadio del tumor. A mayor es el estadio, mayor número de eventos registrados.
+
+
+## __Curva 4__
+
+### Análisis del cambio en la eficacia del tratamiento en cáncer a través de diferentes décadas desde la fecha de diagnóstico más antigua.
+
+### __Calculo variable Fecha diagnóstico__
+
+El calculo de la variable fecha dignóstico (data_of_initial_pathologic_diagnosis) se ha realizado en categorias que marcan periodos de 5 años.
+
+```{r, echo=T}
+df$date_of_initial_pathologic_diagnosis <- as.numeric(df$date_of_initial_pathologic_diagnosis)
+df$date_of_initial_pathologic_diagnosis <- cut(df$date_of_initial_pathologic_diagnosis, breaks = c(1988,1993,1998,2003,2008,2013,2023), labels = c("[1988-1993)", "[1993-1998)", "[1998-2003)", "[2003-2008)", "[2008-2013)", "[2013-2023)"), right = F)
+```
+
+#### __Plot Kaplan Meier__
+
+```{r}
+survfit2(Surv(df$days_to_last_known_alive, as.numeric(df$vital_status)) ~ date_of_initial_pathologic_diagnosis, data=df) %>% 
+  ggsurvfit() +
+  labs(
+    x = "Days",
+    y = "Overall survival probability"
+    ) + 
+  add_confidence_interval() +
+  add_risktable() +
+  add_censor_mark()
+```
+
+
+#### __Surfit__
+
+```{r}
+survfit(Surv(df$days_to_last_known_alive, as.numeric(df$vital_status)) ~ date_of_initial_pathologic_diagnosis, data=df)
+```
+
+__Observaciones:__
+
+- El número de observaciones muestra que el número de diagnósticos ha ido en aumento por periodo de tiempo registrado. 
+- El número de eventos registrados se ha mantenido estable indenpendientemente del crecimiento en el número de observaciones.
+
+
+# __Regresion de Cox__
+
+## __Regresión de Cox univariente__
+
+### Estimar modelos de regresión de Cox univariantes para los factores pronóstico relacionados con cáncer de mama que se encuentren en el conjunto de datos. Analizar los resultados en base al HR y coeficientes beta del modelo.
+
+### __Fecha diagnóstico__
+
+__Levels__
+
+```{r}
+levels(df$date_of_initial_pathologic_diagnosis)
+```
+
+__Cox__
+
+```{r}
+res.cox.1 <- coxph(Surv(df$days_to_last_known_alive, as.numeric(df$vital_status)) ~ date_of_initial_pathologic_diagnosis, data = df)
+summary(res.cox.1)
+```
+
+__Observaciones:__
+
+- Los coeficiente 'exp(coef)', considerados como hazard ratio, muestran que, excepto el ser diagnosticado en el periodo [2003-2008), en el resto se incrementa el riesgo de que se produzca el evento respecto del periodo de tiempo [1988-1993).
+- Los coeficientes beta 'coef', muestran que hay un empeoramiento en el prognóstico por la presencia de las categorias representadas, exceptuando el periodo [2003-2008). No obstante las únicas categorias con significancia estadística Pr(>|z|) son [1998-2003) y [2013-2023).
+- La significancia global del modelo Likelihood ratio p=2e-06 determina que la variable Fecha diagnóstico es significativa como factor de supervivencia.
+
+### __Edad__
+
+__Levels__
+
+```{r}
+levels(df$years_to_birth)
+```
+
+__Cox__
+
+```{r}
+res.cox.10 <- coxph(Surv(df$days_to_last_known_alive, as.numeric(df$vital_status)) ~ years_to_birth, data = df)
+summary(res.cox.10)
+```
+
+__Observaciones:__
+
+- Los coeficiente 'exp(coef)', considerados como hazard ratio, muestran que, el ser diagnosticado teniendo una edad comprendidad entre los periodos [37.5, 40.5), [67.5, 69.5),[71.5, ~), se incrementa el riesgo de que se produzca el evento respecto del periodo de tiempo [0,35.5).
+- Los coeficientes beta 'coef', muestran que hay un empeoramiento en el prognóstico, al ser diagnosticado teniendo una edad comprendidad entre los periodos [37.5, 40.5), [67.5, 69.5),[71.5, ~), respecto del periodo de tiempo [0,35.5). No obstante, ninguna de las categorias representadas tienen significancia estadística Pr(>|z|).
+- La significancia global del modelo Likelihood ratio p=2e-06 determina que la variable Edad es significativa como factor de supervivencia.
+
+
+### __Tipo histológico__
+
+__Levels__
+
+```{r}
+levels(df$histological_type)
+```
+
+__Cox__
+
+```{r}
+res.cox.2 <- coxph(Surv(df$days_to_last_known_alive, as.numeric(df$vital_status)) ~ histological_type, data = df)
+summary(res.cox.2)
+```
+
+__Observaciones:__
+
+- Los coeficiente 'exp(coef)', considerados como hazard ratio, muestran en todas las variables que, cada una de estas incrementa el riesgo de que se produzca el evento respecto del tipo infiltrating carcinoma nos.
+- Los coeficientes beta 'coef', muestran que hay un empeoramiento en el prognóstico por la presencia de las categorias representadas, respecto de infiltrating carcinoma nos. No obstante las ninguna de las variables tienen significancia estadística Pr(>|z|).
+- La significancia global del modelo Likelihood ratio  p=0.9 determina que la variable Tipo histológico no es significativa como factor de supervivencia.
+
+### __Número de nodos__
+
+__Levels__
+
+```{r}
+levels(df$number_of_lymph_nodes)
+```
+
+__Cox__
+
+```{r}
+res.cox.3 <- coxph(Surv(df$days_to_last_known_alive, as.numeric(df$vital_status)) ~ number_of_lymph_nodes, data = df)
+summary(res.cox.3)
+```
+
+__Observaciones:__
+
+- Los coeficiente 'exp(coef)', considerados como hazard ratio, muestran en todas las variables que, cada una de estas incrementa el riesgo de que se produzca el evento respecto de la categoría N0.
+- Los coeficientes beta 'coef' positivos, muestran que hay un empeoramiento en el prognóstico por la presencia de las categorias N1,N2 y N3, respecto de N0. El total de las variables tienen significancia estadística Pr(>|z|).
+- La significancia global del modelo Likelihood ratio p=2e-05 determina que la variable Número de nodos es significativa como factor de supervivencia.
+
+
+### __Raza__
+
+__Levels__
+
+```{r}
+levels(df$race)
+```
+
+__Cox__
+
+```{r}
+res.cox.4 <- coxph(Surv(df$days_to_last_known_alive, as.numeric(df$vital_status)) ~ race, data = df)
+summary(res.cox.4)
+```
+
+__Observaciones:__
+
+- Los coeficiente 'exp(coef)', considerados como hazard ratio, muestran en todas las variables que, cada una de estas incrementa el riesgo de que se produzca el evento respecto de la categoría american indian or alaska native.
+- Los coeficientes beta 'coef' positivos, muestran que hay un empeoramiento en el prognóstico por la presencia de las categorias representadas, respecto de american indian or alaska native. No obstante las ninguna de las variables tienen significancia estadística Pr(>|z|).
+- La significancia global del modelo Likelihood ratio p=0.5 determina que la variable Raza no es significativa como factor de supervivencia.
+
+### __Etnia__
+
+__Levels__
+
+```{r}
+levels(df$ethnicity)
+```
+
+__Cox__
+
+```{r}
+res.cox.5 <- coxph(Surv(df$days_to_last_known_alive, as.numeric(df$vital_status)) ~ ethnicity, data = df)
+summary(res.cox.5)
+```
+
+__Observaciones:__
+
+- Los coeficiente 'exp(coef)', considerados como hazard ratio, muestran en la categoria not hispanic or latino que, su presencia incrementa el riesgo de que se produzca el evento respecto de la categoría hispanic or latino.
+- El coeficiente beta 'coef' positivo, muestran que hay un empeoramiento en el prognóstico por la presencia de la categoria not hispanic or latino, respecto de hispanic or latino. No obstante la categoria not hispanic or latino tiene significancia estadística Pr(>|z|).
+- La significancia global del modelo Likelihood ratio p=0.02 determina que la variable Etnia es significativa como factor de supervivencia.
+
+
+### __Estadio__
+
+__Levels__
+
+```{r}
+levels(df$stage)
+```
+
+__Cox__
+
+```{r}
+res.cox.6 <- coxph(Surv(df$days_to_last_known_alive, as.numeric(df$vital_status)) ~ stage, data = df)
+summary(res.cox.6)
+```
+
+__Observaciones:__
+
+- Los coeficiente 'exp(coef)', considerados como hazard ratio, muestran en todas las categorias que, cada una de estas incrementa el riesgo de que se produzca el evento respecto de la categoría stage i.
+- Los coeficientes beta 'coef' positivos, muestran que hay un empeoramiento en el prognóstico por la presencia de las categorias stage ii, stage iii y stage iv, respecto de stage i. Las categorias stage iii y stage iv tienen significancia estadística Pr(>|z|).
+- La significancia global del modelo Likelihood ratio p=6e-08 determina que la variable Estadio es significativa como factor de supervivencia.
+
+### __T__
+
+__Levels__
+
+```{r}
+levels(df$pathology_T_stage)
+```
+
+__Cox__
+
+```{r}
+res.cox.7 <- coxph(Surv(df$days_to_last_known_alive, as.numeric(df$vital_status)) ~ pathology_T_stage, data = df)
+summary(res.cox.7)
+```
+
+__Observaciones:__
+
+- Los coeficiente 'exp(coef)', considerados como hazard ratio, muestran en todas las variables que, cada una de estas incrementa el riesgo de que se produzca el evento respecto de t1.
+- Los coeficientes beta 'coef', muestran que hay un empeoramiento en el prognóstico por la presencia de las categorias representadas, respecto de t1. No obstante, unicamente t4 tiene significancia estadística Pr(>|z|).
+- La significancia global del modelo Likelihood ratio  p=0.004 determina que la variable pathology_T_stage es significativa como factor de supervivencia.
+
+### __N__
+
+__Levels__
+
+```{r}
+levels(df$pathology_N_stage)
+```
+
+__Cox__
+
+```{r}
+res.cox.8 <- coxph(Surv(df$days_to_last_known_alive, as.numeric(df$vital_status)) ~ pathology_N_stage, data = df)
+summary(res.cox.8)
+```
+
+__Observaciones:__
+
+- Los coeficiente 'exp(coef)', considerados como hazard ratio, muestran en todas las variables que, cada una de estas incrementa el riesgo de que se produzca el evento respecto de n0.
+- Los coeficientes beta 'coef', muestran que hay un empeoramiento en el prognóstico por la presencia de las categorias representadas, respecto de n0. Todas las categorias representadas tienen significancia estadística Pr(>|z|).
+- La significancia global del modelo Likelihood ratio  p=7e-05 determina que la variable pathology_N_stage es significativa como factor de supervivencia.
+
+### __M__
+
+__Levels__
+
+```{r}
+levels(df$pathology_M_stage)
+```
+__Cox__
+
+```{r}
+res.cox.9 <- coxph(Surv(df$days_to_last_known_alive, as.numeric(df$vital_status)) ~ pathology_M_stage, data = df)
+summary(res.cox.9)
+```
+
+__Observaciones:__
+
+- Los coeficiente 'exp(coef)', considerados como hazard ratio, muestra que m1,  incrementa el riesgo de que se produzca el evento respecto de m0.
+- Los coeficientes beta 'coef', muestran que hay un empeoramiento en el prognóstico por la presencia de m1, respecto de m0. La categoria m1 tiene significancia estadística Pr(>|z|).
+- La significancia global del modelo Likelihood ratio  p=4e-04 determina que la variable pathology_M_stage es significativa como factor de supervivencia.
+
+### Estimar el mejor modelo de Cox multivariante utilizando algún procedimiento de selección de variables. Podéis realizar una búsqueda exhaustiva del mejor modelo (de forma similar a como hicimos en Minería de Datos) o aplicar algunos de los algoritmos presentes en paquetes publicados en la literatura.
+
+Seleccionamos las variables de tipo factor, para analizar mediante modelos de Cox multivariantes.
+
+```{r, echo=T}
+# Variables 
+var.names <- c("date_of_initial_pathologic_diagnosis", "histological_type", "number_of_lymph_nodes", "race", "ethnicity", "stage","pathology_M_stage","pathology_T_stage")
+# Añadimos las variables tiempo y evento
+col.names <- c(var.names, c("days_to_last_known_alive","vital_status"))
+df.cox <- df[,col.names]
+```
+
+```{r, echo=T}
+bestCox <- function(data., names) {
+  
+  ## DataFrame de resultados
+  df.results <- data.frame(Variables=character(), coxph_pValue = numeric(), coxzph_pValue = numeric())
+  
+  # Nombres de variables a combinar
+  comb_names <- unlist(lapply(0:length(names),function(m) {combn(names, m=m, simplify=FALSE)}), recursive=FALSE)
+  
+  for(i in 2:length(comb_names)) {
+    s <- ""
+    for(e in 1:(length(comb_names[[i]]))){
+      if(e == (length(comb_names[[i]]))) {
+        s <- paste0(s, comb_names[[i]][e])
+      } else {
+        s <- paste0(s, comb_names[[i]][e],sep="+")
+      }
+    }
+    
+    # Cox - Test Proportional Hazards Assumption
+    v <- as.formula(paste0("Surv(data.$days_to_last_known_alive, as.numeric(data.$vital_status)) ~ ", as.character(s)))
+    res.cox <- coxph(v, data=data.)
+    res.zph <- cox.zph(res.cox)
+
+    # Añadir valores a dataframe
+    df.results.add <- data.frame(Variables=as.character(s), coxph_pValue = as.numeric(summary(res.cox)$logtest["pvalue"][[1]]), coxzph_pValue = as.numeric(res.zph$table["GLOBAL",3]))
+    df.results <- rbind(df.results, df.results.add)
+    
+  }
+  return(df.results)
+  
+}
+```
+
+Seleccionamos aquellos modelos que cumplan los criterios proporcionalidad de riesgos  p-valor > 0.05 y significancia global del modelos p-valor < 0.05.
+
+```{r}
+table.cox <- bestCox(df.cox, var.names)
+datatable(table.cox[which(table.cox$coxph_pValue < 0.05 & table.cox$coxzph_pValue > 0.05), ])
+```
+
+__Observaciones:__
+
+- De un total de 256 modelos, 82 de estos han cumplido los criterios, proporcionalidad de riesgos  p-valor > 0.05 y significancia global del modelos p-valor < 0.05.
+- En base a la significancia global de los modelos, observamos que los modelos seleccionados, muestran valores p-valor en un rango [3.335e-8, 0.047], siendo la combinación de variables date_of_initial_pathologic_diagnosis+number_of_lymph_nodes+ethnicity la que mejor p-valor muestra 3.335e-8. 
+- En base al criterio de proporcionalidad de riesgos, observamos que los modelos seleccionados,  muestran valores p-valor en un rango [0.050, 0.697], siendo la combinación de variables race+pathology_M_stage la que mejor p-valor muestra 0.697.
+
+
+# __Machine Learning__
+
+## __1. Crear el conjunto de datos para modelar el problema de predicción de evento a instante de tiempo fijo de acuerdo a lo analizado en clase.__
+
+
+```{r, echo=T}
+## Seleccionamos instante de tiempo fijo en 7 años (2555 días)
+df.fixed <- df
+## Observaciones con tiempo de estudio menor o igual a 730 días y no hallan sufrido el evento, no se tiene información del estado en el tiempo fijado y se elimina la observación.
+df.fixed <- df.fixed[-c(which(df.fixed$days_to_last_known_alive <= 5500 & df.fixed$vital_status == 0)),]
+## Observaciones con tiempo de estudio menor o igual a 730 días y hallan sufrido el evento, conservan dicho estado en el instante fijado
+df.fixed$vital_status[which(df.fixed$days_to_last_known_alive <= 5500 & df.fixed$vital_status == 1)] <- 1
+## Observaciones con tiempo de estudio mayor a 730 días y hallan sufrido el evento, en el instante fijado no lo han sufrido aún
+df.fixed$vital_status[which(df.fixed$days_to_last_known_alive > 5500 & df.fixed$vital_status == 1)] <- 0
+## Observaciones con tiempo de estudio mayor a 730 días y no hallan sufrido el evento, conservan dicho estado en el instante fijado
+df.fixed$vital_status[which(df.fixed$days_to_last_known_alive > 5500 & df.fixed$vital_status == 0)] <- 0
+# Actualizamos tiempo de las observaciones que superen el tiempo fijado
+df.fixed$days_to_last_known_alive[which(df.fixed$days_to_last_known_alive > 5500)] <- 5500
+## Subconjunto de la población seguidos hasta instante de tiempo fijo
+df.fixed <- df.fixed[which(df.fixed$days_to_last_known_alive <= 5500),]
+```
+
+
+## __2. Realizar el análisis de expresión diferencial utilizando el paquete limma para seleccionar los genes relacionados con la nueva variable "evento". El conjunto de datos definitivo estará constituido por estos genes y los datos clínico-patológicos.__
+
+```{r, echo=FALSE}
+rnaseq <- brcaData@RNASeq2GeneNorm[[1]]@DataMatrix
+
+# Modificamos los ids para que coincidan con los datos clínicos
+colnames(rnaseq) <- str_to_lower(colnames(rnaseq))
+colnames(rnaseq) <- str_replace_all(colnames(rnaseq), "-", ".")
+colnames(rnaseq) <- str_sub(colnames(rnaseq), start = 1, end = 12)
+
+# Eliminamos columnas duplicadas
+rnaseq <- rnaseq[,unique(colnames(rnaseq))]
+
+# Seleccionamos las observaciones coincidentes con el conjunto de datos clínicos en un instante de tiempo fijo
+rnaseq <- rnaseq[,rownames(df.fixed)]
+```
+
+#### __Tabla genes diferencialmente expresado con significancia estadística :__
+
+Del total de genes iniciales, 89 cumplen con una significancia estadística adj.p-valor < 0.05. El conjunto de 89 genes, más los datos clínicos formarán el conjunto de datos al que aplicaremos ML.
+
+```{r}
+library(limma)
+library(Biobase)
+
+# rnaseq contiene los datos de RNA-Seq normalizados.
+
+# df.fixed contiene los datos clínicos de los pacientes.
+df.fixed$vital_status <- as.factor(df.fixed$vital_status)
+datosES <-  ExpressionSet(log2(rnaseq+1))
+
+pData(datosES) <-  df.fixed[sampleNames(datosES),]
+
+
+# Consideramos status como la nueva variable evento construida para modelar la predicción a instante de tiempo fijo.
+mm <- model.matrix(~0+vital_status, data=pData(datosES))
+
+fit <-  lmFit(datosES, mm)
+
+#head(coef(fit)) # Visualiza los coeficientes de ajustes del modelo.
+
+contr <- makeContrasts(vital_status1 - vital_status0, levels = colnames(coef(fit))) # matriz de contrastes para comparación de nivel de expresión de genes entre diferentes condiciones.
+
+tmp <- contrasts.fit(fit, contr)
+
+tmp <-  eBayes(tmp)
+
+top.table <- topTable(tmp, sort.by = "P", n = Inf)
+
+# Seleccionamos los nombres de los genes con un adj.Val < 0.05
+diff.express <- rownames(top.table[which(top.table$adj.P.Val < 0.05),])
+
+# Obtenemos el subconjunto correspondiente a los genes diferencialmente expresados de los datos de expresion iniciales
+rnaseq.diff <- rnaseq[c(diff.express),]
+
+# Intercambiamos filas por columnas
+rnaseq.diff <- t(rnaseq.diff)
+
+datatable(top.table[which(top.table$adj.P.Val < 0.05),])
+```
+
+
+
+## __3. Estimar modelos predictivos de la nueva variable "evento" usando algoritmos de Machine Learning (lasso, svm, ann y random forest). Se utilizará un esquema de validación cruzada 5x2 y AUC como métrica de evaluación de modelos. Asimismo, se deberán usar algoritmos de filtrado para la selección de las variables más importantes con cada esquema de modelado.__
+
+
+#### __Selección de variables__
+
+La selección de variables tiene como objetivo eliminar aquellas variables que aporten ruido en las predicciones, mejorar la interpretación de los modelos y reducir los recursos de cómputo. Como se ha mencionado la selección de variables nos va ha permitir obtener una visión más clara de cuales genes tienen mayor influencia en la predicción, situación clave en el contexto de nuestro problema.
+
+Inicialmente del conjunto inicial de 89 genes, seleccionaremos los 25 más representativos. 
+
+El método que seleccionaremos en la selección de los 25 primeros genes será el **grado de correlación** de estos respecto de la variable target/vital_status. Los genes seleccionados serán los que tengan un grado de correlación mayor, tanto positiva como negativa. 
+
+
+`Correlation Filter`
+
+```{r, echo=T}
+CorrelationFilter <- function(dataframe, ncolumns.) {
+
+ncolumns <- ncolumns.+1
+dataframe$vital_status <- as.numeric(dataframe$vital_status)
+
+set.seed(7)
+# calculate correlation matrix
+correlationMatrix <- cor(dataframe)
+# find attributes that are highly corrected
+orderCorrelation <- order(abs(correlationMatrix["vital_status",]), decreasing = TRUE)
+
+list.corr. <- correlationMatrix["vital_status",]
+
+dataframe. <- dataframe[,names(correlationMatrix["vital_status",orderCorrelation[2:ncolumns]])] 
+
+elements <- list(dataframe = dataframe., list.corr = list.corr.)
+
+return (elements)
+
+}
+```
+
+`Information Gain Filter`
+
+```{r, echo=T}
+InformatioGainFilter <- function (dataframe, ncolumns.) {
+  
+IG.CORElearn <- attrEval(vital_status==1 ~ ., data=dataframe,  estimator = "InfGain")
+
+list.IG. <- IG.CORElearn
+
+dataframe. <- dataframe[,names(IG.CORElearn[order(IG.CORElearn, decreasing = TRUE)[1:ncolumns.]])] 
+dataframe.$vital_status <- dataframe$vital_status
+
+data.frame.results <- data.frame(Columns = names(IG.CORElearn[order(IG.CORElearn, decreasing = TRUE)]), IG = IG.CORElearn[order(IG.CORElearn, decreasing = TRUE)])
+
+elements <- list(dataframe = dataframe., list.IG = data.frame.results)
+
+return (elements)
+
+}
+```
+
+
+### __Primera selección de variables__
+
+```{r}
+# Añadimos genes diferencialmente expresados al conjunto de datos clínicos con tiempo fijo
+df.genes25 <- as.data.frame(rnaseq.diff)
+df.genes25$vital_status <- df.fixed$vital_status
+
+## Correlation filter
+df.genes25 <- CorrelationFilter(df.genes25, 25)
+df.fixed <- cbind(df.fixed, df.genes25$dataframe)
+```
+
+#### __Lista 25 genes más correlacionados con la variable evento__
+
+```{r}
+colnames(df.genes25$dataframe)
+```
+
+Teniendo en cuenta que los modelos no serán entrenados con más de 10 variables posteriormente se realizará una segunda selección de variables. 
+
+La segunda selección de variables estará basada en la **ganancia de información** de las variables independientes respecto de la variable target/vital_status. 
+
+Los métodos de selección de variables seleccionados pertenecen al grupo de métodos de filtrado. Los métodos de filtrado utilizan la información estadística propia del conjunto de variables. Son computacionalmente menos costosos en comparación con métodos wrapper o embeddded. A su vez evitan un sobreajuste de los modelos a las variables seleccionadas.  
+
+
+#### __Algoritmos aplicados__
+
+Se utilizarán los modelos lasss, ANN, SVM y random forest.
+
+- **Lasso**
+
+La regresión Lasso (Least Absolute Shrinkage and Selection Operator) es una técnica estadísticad para la regularización de modelos y selección de variables. Lasso impone una penalización sobre los coeficientes de regresión forzando que tiendan a cero. Este penalización provoca la reducción de los coeficientes menos significativos para el modelo, reduce oferffting y atenua el efecto de la correlación entre coeficcientes. El grado de penalización este controlado por el hiperparámetro lambda. Lambda = 0, equivale a un modelo lineal por mínimos cuadrados ordinarios. A medida que aumente lambda mayor es la penalización sobre los predictores del modelo. 
+
+
+- **Neural Networks**
+
+Las redes neuronales es un subconjunto del machine learning inspirado en el comportamiento del cerebro humano y la forma biológica en la que las neuronas llevan a cabo sus funciones.
+
+Estan formadas por un conjunto de neuronas estructuradas por capas. Se diferencian tres tipos de capas, input, hidden y output. Y la toma de decisión esta dirigida por una serie de pesos y valores humbrales. 
+
+Estos contienen una serie de parámetros que permiten controlar la complejidad del modelo o capacidad de generalización.
+
+En este apartado se crearan varios modelos de redes neuronales artificiales, cada uno de ellos con una combianción de los parámetros mas representativos de estos. 
+
+Los parámetros a partir de los cuales formaremos las distintas configuraciones son el **número de neuronas** de la capa oculta y el **weight decay**.
+
+La elección del número de neuronas no tiene una regla fija. Es aconsejable que el número de neuronas de la capa oculta este entre el tamaño de las variables de entrada y salida. Valores excesivamente altos del número de neuronas derivan en overfitting por la facilidad que tendrán estas de memorizar cada situación presentada en el conjunto de entrenamiento. 
+
+En relación al valor weight decay usualmente se suele tomar 0.1 o 0.01. Valores altos de weight decay provocarán un aumento excesivo del control de la complejidad del modelo que no será capaz de 'adaptarse' correctamente. De forma inversa valores excesivamente bajos de weight decay provocarán que la complejidad del modelo no este limitada y la función resultante se ajuste demasiado a los datos del modelo, generando así overfitting.
+
+- **SVM**
+
+El objetivo de SVM es encontrar la mejor linea o hiperplano que clasifique optimamente las distintas instancias de un conjunto de datos. 
+
+A través de los parámetros de **C** y **Gamma** se puede controlar como ajustar la superficie de decisión al conjunto de datos. El valor de C marca el margen de error de la superficie o linea de decisión (número de instancias en zona no perteneciente a su clase). Con el valor de gamma controlamos como la curva de superficie de decisión se ajusta al conjunto de entrenamiento.
+
+
+- **Random Forest**
+
+La técnica de clasificación Random forest consiste en n árboles de decisión que operan como un ensemble. Cada arbol de decisión toma una decisión de clasificación, siendo la predicción final del modelo, la clase mas votadas del conjunto total de árboles. Entre los hiperparámetros mas significativos de este tipo de modelos tenemos, el número de árboles, profundidad de los arboles o número de observaciones por hoja. 
+
+#### Métricas
+
+Las métricas que usaremos para evaluar los modelos serán ACC, Precision, AUC, RECALL y F1 Score.
+
+Evaluarán los modelos en los conjuntos de entrenamiento, validación y test 
+
+- **ACC**
+
+Representa el ratio de predicciones correctas sobre el total de datos de entrada. 
+
+ACC = (TP+TN)/(TP+TN+FP+FN)
+
+Rango ACC [0,1]. Valores altos de ACC determinan mejor rendimiento del modelo.
+
+- **Precision**
+
+Representa el ratio de predicciones correctas positivas sobre el total de predicciones positivas realizadas
+
+Precision = (TP)/(TP+FP)
+
+Rango Precision [0,1]. Valores altos de Precision determinan mejor rendimiento del modelo
+
+- **AUC (Area Under the)**
+
+Determina la capacidad del modelo para distinguir entre clases. Es aplicada en problemas de clasificación binária. La curva ROC estima la probabilidad de que un modelo clasifique una instancia positiva elegida al azar más alto que una instacia negativa elegida al azar
+
+Rango de AUC [0,1]. Valores altos de AUC determinan mejor rendimiento del modelo.
+
+- **RECALL**
+
+Determina la cantidad de instancias postivas que el modelo es capaz de identificar.
+
+RECALL = (TP)/(TP+FN)
+
+Rango de RECALL [0,1]. Valores altos de RECALL determinan mejor rendimiento del modelo.
+
+- **F1 Score**
+
+Determina como de preciso y exhaustivo/robusto es el modelo. Es calculada a partir de la media harmónica ente precisión y recall. Asume que importa de igual forma la precisión y recall. Esto puede ser modificado dependiendo del contexto del problema. 
+
+F1 Score = (2*RECALL*PRECISIÓN)/(RECALL+PRECISIÓN)
+
+Rango de F1 Score [0,1]. Valores altos de F1 Score determinan mejor rendimiento del modelo.
+
+
+`Outer loop Cross Validation 5x2`
+
+```{r, echo=T}
+outerfoop <- function(data, model, parameters, ncolumns, smote) {
+  
+  
+  ## Almacenamos los resultados del inner loop.
+  FoldsResults. <- list()
+  
+  ## Realizamos las 5 particiones de los datos
+  Folds <- createFolds(data$vital_status,5)
+  
+  
+  ## DataFrame de resultados
+  data.frame.metricas <- data.frame(Iteracion = character(), Modelo=character(), Parametro1=character(), Parametro2=character(), TecnicaFS = character(), NColumnas = numeric(), ACC.train = numeric(), ACC.test = numeric(), Precision.train = numeric(), Precision.test=numeric(), AUC.train = numeric(), AUC.test = numeric(), RECALL.train = numeric(), RECALL.test = numeric(), F1.train = numeric(), F1.test = numeric())
+  
+  ## Lista de parámetros
+  param.list <- parameters
+  
+  ## Codificamos las variables categóricas
+  data.LE <- data
+  
+  for(k in Folds) {
+    
+    
+    ## Inicializamos las variables que contendrán los valores ACC training y ACC test respectivamente
+    ACC.cross.val <- 0.0
+    ACC.cross.val.test <- 0.0
+    AUC.cross.val <- 0.0
+    AUC.cross.val.test <- 0.0
+    
+    ## Conjunto de datos de training
+    datos.cross.val <- data.LE[-k,]
+    
+    ## Cargamos los elementos de innerfoop
+    inner.loop <- innerfoop(datos.cross.val, model, parameters, ncolumns, smote)
+    best.parameter1 <- inner.loop$BestParameter1
+    best.parameter2 <- inner.loop$BestParameter2
+    best.TecnicaFS <- inner.loop$BestFS
+    FoldsResults.[[1+length(FoldsResults.)]] <- inner.loop$Results
+    
+    ## Seleccionamos la técnica de selección de variables
+    
+    if(best.TecnicaFS == "InformationGainFilter") {
+      
+      data.FS <- InformatioGainFilter(data.LE,ncolumns)$dataframe
+      
+    }
+    
+    ## SMOTE 
+    if (smote == TRUE) {
+      
+      ## Aplicamos SMOTE
+      datos.cross.val <- SMOTE(data.FS, data.FS$vital_status, K=4)$data
+      datos.cross.val$class <- NULL
+      datos.cross.val <- datos.cross.val[-k,]
+
+    } else {
+      
+      ## Conjunto de datos de training
+      datos.cross.val <- data.FS[-k,]
+      
+    }
+    
+    
+    ## Conjunto de datos de test
+    datos.test.cross.val <- data.FS[k,]
+    
+    
+    ## Selección de modelos 
+    if(model== "lasso") {
+      
+      x_vars <- data.matrix(datos.cross.val[, -(match(c("vital_status"),colnames(df.fixed)))])
+      y_var <- datos.cross.val$vital_status
+      ls.fit <- glmnet(x_vars,y_var,family = "binomial", lambda = as.numeric(best.parameter1)) 
+      
+      ## Predecimos las respuesta con el conjunto de training
+      predic.training <-  predict(ls.fit, newx = x_vars, type = "class")
+      
+      ## Predecimos las respuesta con el conjunto de test
+      x_vars_test <- data.matrix(datos.test.cross.val[, -(match(c("vital_status"),colnames(datos.test.cross.val)))])
+      predic.test <- predict(ls.fit, newx = x_vars_test, type = "class")
+      
+    }
+    
+    if(model== "nnet") {
+      
+      neu <- as.numeric(best.parameter1)
+      decay. <- as.numeric(best.parameter2)
+      max.ite <- as.numeric(100)
+      
+      ## Red neuronal nnet
+      nn.fit <- nnet(vital_status=="1"~ ., data=datos.cross.val, size=neu,entropy=TRUE,maxit=100, decay=decay., MaxNWts=4000,trace=FALSE)
+      
+      ## Predecimos las respuesta con el conjunto de training
+      predic.training <- predict(nn.fit, datos.cross.val, type="class")
+      
+      ## Predecimos las respuesta con el conjunto de test
+      predic.test <- predict(nn.fit, datos.test.cross.val, type="class")
+    }
+    
+    if(model== "svm") {
+      
+      gamma. <- as.numeric(best.parameter1)
+      cost. <- as.numeric(best.parameter2)
+      
+      ## Support Vector Machines
+      svm.fit <- svm(vital_status=="1" ~ ., cost=cost., data=datos.cross.val,type="C-classification", kernel="radial", gamma=gamma., probability=TRUE)
+      
+      ## Predecimos las respuesta con el conjunto de training
+      pred <- predict(svm.fit, datos.cross.val, probability=TRUE)
+      predic.training <- attr(pred, which="probabilities")[,"TRUE"]
+      
+      ## Predecimos las respuesta con el conjunto de test
+      pred <- predict(svm.fit, datos.test.cross.val, probability=TRUE)
+      predic.test <- attr(pred, which="probabilities")[,"TRUE"]
+      
+    }
+    
+    if(model=="rf") {
+      
+      ntree. <- as.numeric(best.parameter1)
+      
+      ## Random Forest
+      rf <- randomForest(x = datos.cross.val[, -(match(c("vital_status"),colnames(datos.cross.val)))], y=as.numeric(datos.cross.val$vital_status), ntree = ntree.) 
+      
+      
+      ## Predecimos las respuesta con el conjunto de training
+      predic.training <- predict(rf, newdata = datos.cross.val[, -(match(c("vital_status"),colnames(datos.cross.val)))], type = "response")
+      
+      ## Predecimos las respuesta con el conjunto de test
+      predic.test <- predict(rf, newdata = datos.test.cross.val[, -(match(c("vital_status"),colnames(datos.cross.val)))],type = "response")
+      
+    }
+    
+    ## Binarizamos la respuesta
+    predic.training[predic.training >= 0.5] <- 1
+    predic.training[predic.training < 0.5] <- 0
+    predic.test[predic.test >= 0.5] <- 1
+    predic.test[predic.test < 0.5] <- 0
+    
+    ## Obtenemos los TP,TN,FP,FN training
+    true.pos.cross.val <- sum(predic.training == 1 & datos.cross.val$vital_status == 1)
+    true.neg.cross.val <- sum(predic.training == 0 & datos.cross.val$vital_status == 0)
+    false.neg.cross.val <- sum(predic.training == 0 & datos.cross.val$vital_status == 1)
+    false.pos.cross.val <- sum(predic.training == 1 & datos.cross.val$vital_status == 0)
+    
+    ## ACC, RECALL y F1 score training
+    ACC.cross.val.vector <- (true.pos.cross.val+true.neg.cross.val)/length(datos.cross.val$vital_status)
+    precision.cross.val <- (true.pos.cross.val)/(true.pos.cross.val+false.pos.cross.val)
+    RECALL.cross.val <- (true.pos.cross.val)/(true.pos.cross.val+false.neg.cross.val)
+    F1.cross.val <- (2*RECALL.cross.val*ACC.cross.val.vector/(RECALL.cross.val+ACC.cross.val.vector))
+    
+    ## Obtenemos los TP y TN test
+    true.pos.test.cross.val <- sum(predic.test == 1 & datos.test.cross.val$vital_status == 1)
+    true.neg.test.cross.val <- sum(predic.test == 0 & datos.test.cross.val$vital_status == 0)
+    false.neg.test.cross.val <- sum(predic.test == 0 & datos.test.cross.val$vital_status == 1)
+    false.pos.test.cross.val <- sum(predic.test == 1 & datos.test.cross.val$vital_status == 0) 
+    ACC.test.cross.val.vector <-(true.pos.test.cross.val+true.neg.test.cross.val)/length(datos.test.cross.val$vital_status)
+    
+    ## ACC, RECALL y F1 score test
+    RECALL.test.cross.val <- (true.pos.test.cross.val)/(true.pos.test.cross.val+false.neg.test.cross.val)
+    precision.test.cross.val <- (true.pos.test.cross.val)/(true.pos.test.cross.val+false.pos.test.cross.val)
+    F1.test.cross.val <- (2*RECALL.test.cross.val*ACC.test.cross.val.vector/(RECALL.test.cross.val+ACC.test.cross.val.vector))
+    
+    ## Obtenemos AUC training de cada iteración
+    dataAUC.train.cross.val <- data.frame(predictions = as.vector(predic.training), vital_status = datos.cross.val$vital_status)
+    data(dataAUC.train.cross.val)
+    pred.AUC.cross.val <- prediction(as.numeric(dataAUC.train.cross.val$predictions), as.numeric(dataAUC.train.cross.val$vital_status))
+    perf.AUC.cross.val <- performance(pred.AUC.cross.val, "auc")
+    AUC.value.cross.val <- perf.AUC.cross.val@y.values[[1]]
+    
+    ## Obtenemos AUC test de cada iteración
+    dataAUC.test.cross.val <- data.frame(predictions = as.vector(predic.test), vital_status = datos.test.cross.val$vital_status)
+    data(dataAUC.test.cross.val)
+    pred.AUC.cross.val.test <- prediction(as.numeric(dataAUC.test.cross.val$predictions), as.numeric(dataAUC.test.cross.val$vital_status))
+    perf.AUC.cross.val.test <- performance(pred.AUC.cross.val.test, "auc")
+    AUC.value.test.cross.val <- perf.AUC.cross.val.test@y.values[[1]]
+    
+    ## Añadimos los resultado de la iteración al dataframe de resultado
+    data.frame.metricas.add <- data.frame(Iteracion = c("Parcial"), Modelo = c(model), Parametro1 =best.parameter1, Parametro2 =best.parameter2, TecnicaFS = c(best.TecnicaFS),NColumnas = c(ncolumns), ACC.train = c(ACC.cross.val.vector), ACC.test = c(ACC.test.cross.val.vector),Precision.train = c(precision.cross.val), Precision.test=c(precision.test.cross.val), AUC.train = c(AUC.value.cross.val), AUC.test = c(AUC.value.test.cross.val), RECALL.train = c(RECALL.cross.val), RECALL.test = c(RECALL.test.cross.val), F1.train = c(F1.cross.val), F1.test = c(F1.test.cross.val))
+    data.frame.metricas <- rbind(data.frame.metricas,data.frame.metricas.add);
+    
+    
+  }
+  
+  ## Añadimos los resultado de la iteración al dataframe de resultado
+  data.frame.metricas.global <- data.frame(Iteracion = c("Global"), Modelo = c(model), Parametro1 =c(NA),Parametro2 =c(NA),TecnicaFS = c(NA), NColumnas = c(ncolumns), ACC.train=c(mean(data.frame.metricas$ACC.train)), ACC.test = c(mean(data.frame.metricas$ACC.test)),Precision.train = c(mean(data.frame.metricas$Precision.train)), Precision.test= c(mean(data.frame.metricas$Precision.test)), AUC.train = c(mean(data.frame.metricas$AUC.train)), AUC.test = c(mean(data.frame.metricas$AUC.test)), RECALL.train = c(mean(data.frame.metricas$RECALL.train)), RECALL.test = c(mean(data.frame.metricas$RECALL.test)), F1.train = c(mean(data.frame.metricas$F1.train)), F1.test = c(mean(data.frame.metricas$F1.test)))
+  data.frame.metricas <- rbind(data.frame.metricas,data.frame.metricas.global);
+  
+  ## Devolvemos dataframe con resultado por outer folds y best parameter.
+  elements <- list(Results = data.frame.metricas, NameParametro1 = names(parameters[[1]][1]), NameParametro2 = names(parameters[[2]][1]), FoldsResults = FoldsResults.)
+  
+  
+  return(elements)
+  
+}
+```
+
+
+
+`Inner loop Cross Validation 5x2`
+
+```{r, echo=T}
+innerfoop <- function(data, model, parameters, ncolumns, smote ) {
+
+  ## Dataframe de resultados
+  data.frame.metricas <- data.frame(Model = character(), Parametro1=character(), Parametro2=character(), TecnicaFS = character(), ACC.train = numeric(), ACC.test = numeric(),Precision.train = numeric(), Precision.test=numeric(), AUC.train = numeric(), AUC.test = numeric(), RECALL.train = numeric(), RECALL.test = numeric(), F1.train = numeric(), F1.test = numeric())
+  
+  ## Codificamos las variables categóricas
+  data.LE <- data
+  
+  
+  ## Lista de parámetros
+  param.list <- parameters
+  
+  ## Técnicas Feature Selection
+  tecnicas.fs <- c("InformationGainFilter")
+  
+  
+  for(m in 1:length(tecnicas.fs)) {
+    
+    
+    if(tecnicas.fs[m] == "InformationGainFilter") {
+      
+      data <- InformatioGainFilter(data.LE, ncolumns)$dataframe
+      
+    }
+    
+    ## Realizamos las particiones de los datos
+    train.folds <- createFolds(data$vital_status,2)
+    
+    for (k in 1:length(parameters[[1]][[1]])) {
+    
+    for(j in  1:length(parameters[[2]][[1]])) {
+      
+      # j <- 1
+      
+      ## Inicializamos las variables que contendrán los valores AUC/ACC train y AUC/ACC validation
+      ACC.train.val <- 0.0
+      ACC.test.val <- 0.0
+      AUC.train.val <- 0.0
+      AUC.test.val <- 0.0
+      RECALL.cross.val <- 0.0
+      RECALL.test.cross.val <- 0.0
+      F1.cross.val <- 0.0
+      F1.test.cross.val <- 0.0
+      precision.cross.val <- 0.0
+      precision.test.cross.val <- 0.0
+      
+      
+      for(i in train.folds) {
+        
+        
+        
+        ## Conjunto de datos de training
+        datos.training <- data[i,]
+        
+        ## SMOTE
+        if (smote == TRUE) {
+          
+          ## Aplicamos SMOTE
+          datos.training <- SMOTE(datos.training, datos.training$vital_status, K=4)$data
+          datos.training$class <- NULL
+          datos.training <- datos.training[-i,]
+          
+        }
+        
+        
+        ## Conjunto de datos de validacion
+        datos.validation <- data[-i,]
+        
+        
+        if(model == "lasso") {
+          
+         
+          lambda. <- as.numeric(parameters[[1]][[1]][k])
+          
+          x_vars <- data.matrix(datos.training[, -(match(c("vital_status"),colnames(datos.training)))])
+          y_var <- datos.training$vital_status
+          ls.fit <- glmnet(x_vars,y_var,family = "binomial", lambda = lambda.) 
+          
+          ## Predecimos las respuesta con el conjunto de training
+          predic.training <-  predict(ls.fit, newx = x_vars, type = "class")
+          
+          ## Predecimos las respuesta con el conjunto de test
+          x_vars_test <- data.matrix(datos.validation[, -(match(c("vital_status"),colnames(datos.validation)))])
+          predic.test <- predict(ls.fit, newx = x_vars_test, type = "class")
+          
+          
+        }
+        
+        if(model== "nnet") {
+          
+          neu <- as.numeric(parameters[[1]][[1]][k])
+          decay. <- as.numeric(parameters[[2]][[1]][j])
+          max.ite <- as.numeric(100)
+          
+          ## Red neuronal nnet
+          nn.fit <- nnet(vital_status==1~ ., data=datos.training, size=neu,entropy=TRUE,maxit=100, decay=decay., MaxNWts=4000,trace=FALSE)
+          
+          ## Predecimos las respuesta con el conjunto de training
+          predic.training <- predict(nn.fit, datos.training, type="class")
+          
+          ## Predecimos las respuesta con el conjunto de test
+          predic.test <- predict(nn.fit, datos.validation, type="class")
+        }
+        
+        if(model== "svm") {
+          
+         
+          gamma. <- as.numeric(parameters[[1]][[1]][k])
+          cost. <- as.numeric(parameters[[2]][[1]][j])
+          
+          ## Support Vector Machines
+          svm.fit <- svm(vital_status==1 ~ ., cost=cost., data=datos.training,type="C-classification", kernel="radial", gamma=gamma., probability=TRUE)
+          
+          ## Predecimos las respuesta con el conjunto de training
+          pred <- predict(svm.fit, datos.training, probability=TRUE)
+          predic.training <- attr(pred, which="probabilities")[,"TRUE"]
+          
+          ## Predecimos las respuesta con el conjunto de test
+          pred <- predict(svm.fit, datos.validation, probability=TRUE)
+          predic.test <- attr(pred, which="probabilities")[,"TRUE"]
+          
+        }
+        
+        if(model=="rf") {
+          
+          ntree. <- as.numeric(parameters[[1]][[1]][k])
+          
+          ## Random Forest
+      rf <- randomForest(x = datos.training[, -(match(c("vital_status"),colnames(datos.training)))], y=as.numeric(datos.training$vital_status), ntree = ntree.) 
+      
+      
+      ## Predecimos las respuesta con el conjunto de training
+      predic.training <- predict(rf, newdata = datos.training[, -(match(c("vital_status"),colnames(datos.training)))], type = "response")
+      
+      ## Predecimos las respuesta con el conjunto de test
+      predic.test <- predict(rf, newdata = datos.validation[, -(match(c("vital_status"),colnames(datos.validation)))],type = "response")
+      
+          
+        }
+        
+        
+        ## Binarizamos la respuesta
+        predic.training[predic.training >= 0.5] <- 1
+        predic.training[predic.training < 0.5] <- 0
+        predic.test[predic.test >= 0.5] <- 1
+        predic.test[predic.test < 0.5] <- 0
+
+        
+        ## Obtenemos los TP,TN,FP,FN training
+        true.pos.cross.val <- sum(predic.training == 1 & datos.training$vital_status == 1)
+        true.neg.cross.val <- sum(predic.training == 0 & datos.training$vital_status == 0)
+        false.neg.cross.val <- sum(predic.training == 0 & datos.training$vital_status == 1)
+        false.pos.cross.val <- sum(predic.training == 1 & datos.training$vital_status == 0)
+        ACC.train.val.vector <- (true.pos.cross.val+true.neg.cross.val)/length(datos.training$vital_status)
+        
+        ## ACC, RECALL, Precision y F1 score training
+        ACC.train.val <- ACC.train.val+ACC.train.val.vector
+        precision.cross.val. <- (true.pos.cross.val)/(true.pos.cross.val+false.pos.cross.val)
+        RECALL.cross.val. <- (true.pos.cross.val)/(true.pos.cross.val+false.neg.cross.val)
+        F1.cross.val. <- (2*RECALL.cross.val*precision.cross.val./(RECALL.cross.val+precision.cross.val.))
+        
+        RECALL.cross.val <- RECALL.cross.val + RECALL.cross.val.
+        F1.cross.val <- F1.cross.val + F1.cross.val.
+        precision.cross.val <- precision.cross.val + precision.cross.val.
+        
+        
+        ## Obtenemos los TP y TN test
+        true.pos.test.cross.val <- sum(predic.test == 1 & datos.validation$vital_status == 1)
+        true.neg.test.cross.val <- sum(predic.test == 0 & datos.validation$vital_status == 0)
+        false.neg.test.cross.val <- sum(predic.test == 0 & datos.validation$vital_status == 1)
+        false.pos.test.cross.val <- sum(predic.test == 1 & datos.validation$vital_status == 0) 
+        ACC.test.cross.val.vector <-(true.pos.test.cross.val+true.neg.test.cross.val)/length(datos.validation$vital_status)
+        
+        ## ACC, RECALL,Precision y  F1 score test
+        ACC.test.val <- ACC.test.val+ACC.test.cross.val.vector
+         precision.test.cross.val. <- (true.pos.test.cross.val)/(true.pos.test.cross.val+false.pos.test.cross.val)
+        RECALL.test.cross.val. <- (true.pos.test.cross.val)/(true.pos.test.cross.val+false.neg.test.cross.val)
+        F1.test.cross.val. <- (2*RECALL.test.cross.val*ACC.test.cross.val.vector/(RECALL.test.cross.val+ACC.test.cross.val.vector))
+        precision.test.cross.val <- precision.test.cross.val + precision.test.cross.val.
+        RECALL.test.cross.val <- RECALL.test.cross.val + RECALL.test.cross.val.
+        F1.test.cross.val <- F1.test.cross.val + F1.test.cross.val.
+        
+        
+        
+        ## Obtenemos AUC training de cada iteración
+        dataAUC.train.cross.val <- data.frame(predictions = as.vector(predic.training), vital_status = datos.training$vital_status)
+        data(dataAUC.train.cross.val)
+        pred.AUC.train.val <- prediction(as.numeric(dataAUC.train.cross.val$predictions), as.numeric(dataAUC.train.cross.val$vital_status))
+        perf.AUC.train.val <- performance(pred.AUC.train.val, "auc")
+        AUC.value.cross.val <- perf.AUC.train.val@y.values[[1]]
+        AUC.train.val <- AUC.train.val + AUC.value.cross.val
+        
+        ## Obtenemos AUC test de cada iteración
+        dataAUC.test.cross.val <- data.frame(predictions = as.vector(predic.test), vital_status = datos.validation$vital_status)
+        data(dataAUC.test.cross.val)
+        pred.AUC.test.val <- prediction(as.numeric(dataAUC.test.cross.val$predictions), as.numeric(dataAUC.test.cross.val$vital_status))
+        perf.AUC.test.val <- performance(pred.AUC.test.val, "auc")
+        AUC.value.test.cross.val <- perf.AUC.test.val@y.values[[1]]
+        AUC.test.val <- AUC.test.val + AUC.value.test.cross.val
+        
+      }
+      
+      ACC.train.val <- ACC.train.val/2
+      ACC.test.val <- ACC.test.val/2
+      AUC.test.val <- AUC.test.val/2
+      AUC.train.val <- AUC.train.val/2
+      RECALL.cross.val <- RECALL.cross.val/2
+      RECALL.test.cross.val <- RECALL.test.cross.val/2
+      F1.cross.val <- F1.cross.val/2
+      F1.test.cross.val <- F1.test.cross.val/2
+      precision.cross.val <- precision.cross.val/2
+      precision.test.cross.val <- precision.test.cross.val/2
+      
+
+      data.frame.add <- data.frame(Model = model, Parametro1=as.character(parameters[[1]][[1]][k]),Parametro2=as.character(parameters[[2]][[1]][j]), TecnicaFS = tecnicas.fs[m], ACC.train = ACC.train.val, ACC.test = ACC.test.val, Precision.train = c(precision.cross.val), Precision.test=c(precision.test.cross.val),AUC.train = AUC.train.val, AUC.test = AUC.test.val, RECALL.train = c(RECALL.cross.val), RECALL.test = c(RECALL.test.cross.val), F1.train = c(F1.cross.val), F1.test = c(F1.test.cross.val))
+      data.frame.metricas <- rbind(data.frame.metricas,data.frame.add)
+      data.frame.metricas <- data.frame.metricas[order(data.frame.metricas$AUC.test, decreasing = TRUE), ]
+      
+      
+      
+    }
+  }
+    
+  }
+  
+  elements <- list(Results = data.frame.metricas, BestParameter1 = data.frame.metricas$Parametro1[1], BestParameter2 = data.frame.metricas$Parametro2[1], BestFS = data.frame.metricas$TecnicaFS[1])
+  
+  
+  
+  
+  
+  return(elements)
+  
+}
+
+```
+
+#### __Variables seleccionadas por informationGainFilter__
+
+__6 variables__
+
+```{r}
+ncolumns.6 <- InformatioGainFilter(df.fixed, 6)$dataframe
+colnames(ncolumns.6)
+```
+
+```{r}
+ncolumns.10 <- InformatioGainFilter(df.fixed, 10)$dataframe
+colnames(ncolumns.10)
+```
+
+#### __Análisis de modelos__
+
+##### **Configuración 1** - Lasso
+
+- Datos = df.fixed
+- Lambda = seq(0.0001, 0.001, by = 0.0001)
+- Smote = FALSE
+- Variables = 10
+
+```{r echo=FALSE}
+# seqLs1 <- seq(0.0001, 0.001, by = 0.0001)
+# paramLs1 <- list(param1=list(lambda=c(seqLs1)), param2=list(na=c("NA")))
+# conf.ls.1 <- outerfoop(df.fixed, "lasso", paramLs1, 10, FALSE)$Results
+conf.ls.1
+```
+
+##### **Configuración 2** - Lasso
+
+- Datos = df.fixed
+- Lambda = seq(0.0001, 0.001, by = 0.0001)
+- Smote = FALSE
+- Variables = 6
+
+```{r echo=FALSE}
+# seqLs2 <- seq(0.0001, 0.001, by = 0.0001)
+# paramLs2 <- list(param1=list(lambda=c(seqLs2)), param2=list(na=c("NA")))
+# conf.ls.2 <- outerfoop(df.fixed, "lasso", paramLs2, 6, FALSE)$Results
+conf.ls.2
+```
+
+
+##### **Configuración 3** - Lasso
+
+- Datos = df.fixed
+- Lambda = seq(0.01, 0.1, by = 0.01)
+- Smote = FALSE
+- Variables = 10
+
+```{r echo=FALSE}
+# seqLs3 <- seq(0.01, 0.1, by = 0.01)
+# paramLs3 <- list(param1=list(lambda=c(seqLs3)), param2=list(na=c("NA")))
+# conf.ls.3 <- outerfoop(df.fixed, "lasso", paramLs3, 10, FALSE)$Results
+conf.ls.3
+```
+
+
+```{r echo=FALSE}
+result.ls <- rbind(conf.ls.1,conf.ls.2)
+result.ls <- rbind(result.ls,conf.ls.3)
+```
+
+
+**Resultados Globales Decision Tree**
+
+```{r echo=FALSE}
+global.result.ls <- result.ls[result.ls$Iteracion == "Global",]
+global.result.ls <- global.result.ls[order(global.result.ls$AUC.test, decreasing = TRUE), ]
+global.result.ls$Configuracion <- c(1,2,3)
+global.result.ls
+```
+
+
+##### **Configuración 1** - Neural Networks
+
+- Datos = datos.fixed
+- Neuronas = seq(1, 100, by = 20)
+- Decay = seq(0.01, 0.3, by = 0.05)
+- Smote = FALSE
+- Variables = 10
+
+```{r echo=FALSE}
+# seqNN1 <- seq(1, 100, by = 20)
+# seqNN2 <- seq(0.01, 0.3, by = 0.05)
+# paramNN1 <- list(param1=list(neu=c(seqNN1)), param2=list(decay=c(seqNN2)))
+# conf.nn.1 <- outerfoop(df.fixed, "nnet", paramNN1, 10, FALSE)$Results
+conf.nn.1
+```
+
+##### **Configuración 2** - Neural Networks
+
+- Datos = df.fixed
+- Neuronas = seq(1, 100, by = 20)
+- Decay = seq(0.01, 0.3, by = 0.05)
+- Smote = FALSE
+- Variables = 10
+
+```{r echo=FALSE}
+# seqNN1 <- seq(1, 100, by = 20)
+# seqNN2 <- seq(0.01, 0.3, by = 0.05)
+# paramNN1 <- list(param1=list(neu=c(seqNN1)), param2=list(decay=c(seqNN2)))
+# conf.nn.2 <- outerfoop(df.fixed, "nnet", paramNN1, 10, FALSE)$Results
+conf.nn.2
+```
+
+##### **Configuración 3** - Neural Networks
+
+- Datos = df.fixed
+- Neuronas = seq(1, 100, by = 20)
+- Decay = seq(0.01, 0.3, by = 0.05)
+- Smote = FALSE
+- Variables = 6
+
+```{r echo=FALSE}
+# seqNN1 <- seq(1, 100, by = 20)
+# seqNN2 <- seq(0.01, 0.3, by = 0.05)
+# paramNN1 <- list(param1=list(neu=c(seqNN1)), param2=list(decay=c(seqNN2)))
+# conf.nn.3 <- outerfoop(df.fixed, "nnet", paramNN1, 6, FALSE)$Results
+conf.nn.3
+```
+
+
+```{r echo=FALSE}
+result.nn <- rbind(conf.nn.1, conf.nn.2)
+result.nn <- rbind(result.nn, conf.nn.3)
+```
+
+
+**Resultados Globales Neural Network**
+
+```{r echo=FALSE}
+global.result.nn <- result.nn[result.nn$Iteracion == "Global",]
+global.result.nn <- global.result.nn[order(global.result.nn$AUC.test, decreasing = TRUE), ]
+global.result.nn$Configuracion <- c(1,2,3)
+global.result.nn
+```
+
+##### **Configuración 1** - Support Vector Machine
+
+- Datos = df.fixed
+- Gamma = seq(1, 80, by = 15)
+- Cost = seq(1, 100, by = 20)
+- Smote = TRUE
+- Variables = 10
+
+```{r echo=FALSE}
+# seqSVM1 <- seq(1, 80, by = 15)
+# seqSVM2 <- seq(1, 100, by = 20)
+# paramNN1 <- list(param1=list(gamma=c(seqSVM1)), param2=list(cost=c(seqSVM2)))
+# conf.svm.1 <- outerfoop(df.fixed, "svm", paramNN1, 10, FALSE)$Results
+conf.svm.1
+```
+
+##### **Configuración 2** - Support Vector Machine
+
+- Datos = df.fixed
+- Gamma = seq(1, 80, by = 15)
+- Cost = seq(1, 100, by = 20)
+- Smote = FALSE
+- Variables = 10
+
+```{r echo=FALSE}
+# seqSVM1 <- seq(1, 160, by = 20)
+# seqNSVM2 <- seq(1, 100, by = 20)
+# paramNN1 <- list(param1=list(gamma=c(seqSVM1)), param2=list(cost=c(seqSVM2)))
+# conf.svm.2 <- outerfoop(df.fixed, "svm", paramNN1, 10, FALSE)$Results
+conf.svm.2
+```
+
+##### **Configuración 3** - Support Vector Machine
+
+- Datos = df.fixed
+- Gamma = seq(1, 80, by = 15)
+- Cost = seq(1, 100, by = 20)
+- Smote = FALSE
+- Variables = 6
+
+```{r echo=FALSE}
+# seqSVM1 <- seq(1, 80, by = 15)
+# seqNSVM2 <- seq(1, 100, by = 20)
+# paramNN1 <- list(param1=list(gamma=c(seqSVM1)), param2=list(cost=c(seqSVM2)))
+# conf.svm.3 <- outerfoop(df.fixed, "svm", paramNN1, 6, FALSE)$Results
+conf.svm.3
+```
+
+
+
+```{r echo=FALSE}
+result.svm <- rbind(conf.svm.1, conf.svm.2)
+result.svm <- rbind(result.svm, conf.svm.3)
+```
+
+**Resultados Globales Support Vector Machine**
+
+```{r echo=FALSE}
+global.result.svm <- result.svm[result.svm$Iteracion == "Global",]
+global.result.svm <- global.result.svm[order(global.result.svm$AUC.test, decreasing = TRUE), ]
+global.result.svm$Configuracion <- c(1,2,3)
+global.result.svm
+```
+
+
+##### **Configuración 1** - Random Forest
+
+- Datos = df.fixed
+- Ntree = seq(1, 10, by = 1)
+- Smote = TRUE
+- Variables = 10
+
+```{r echo=FALSE}
+# seqrf1 <- seq(1, 10, by = 1)
+# paramrF1 <- list(param1=list(ntree=c(seqrf1)), param2=list(na=c("NA")))
+# conf.rf.1 <- outerfoop(df.fixed, "rf", paramrF1, 10, FALSE)$Results
+conf.rf.1
+```
+
+##### **Configuración 2** - Random Forest
+
+- Datos = df.fixed
+- Ntree = seq(1, 30, by = 5)
+- Smote = TRUE
+- Variables = 30
+
+```{r echo=FALSE}
+# seqrf2 <- seq(1, 30, by = 5)
+# paramrF2 <- list(param1=list(ntree=c(seqrf2)), param2=list(na=c("NA")))
+# conf.rf.2 <- outerfoop(df.fixed, "rf", paramrF2, 30, FALSE)$Results
+conf.rf.2
+```
+
+
+##### **Configuración 3** - Random Forest
+
+- Datos = df.fixed
+- Ntree = seq(1, 10, by = 1)
+- Smote = TRUE
+- Variables = 30
+
+```{r echo=FALSE}
+# seqrf3 <- seq(1, 10, by = 1)
+# paramrF3 <- list(param1=list(ntree=c(seqrf3)), param2=list(na=c("NA")))
+# conf.rf.3 <- outerfoop(df.fixed, "rf", paramrF3, 30, FALSE)$Results
+conf.rf.3
+```
+
+
+```{r echo=FALSE}
+result.rf <- rbind(conf.rf.1, conf.rf.2)
+result.rf <- rbind(result.rf, conf.rf.3)
+```
+
+**Resultados Globales Random Forest**
+
+```{r echo=FALSE}
+global.result.rf <- result.rf[result.rf$Iteracion == "Global",]
+global.result.rf <- global.result.rf[order(global.result.rf$AUC.test, decreasing = TRUE), ]
+global.result.rf$Configuracion <- c(1,2,3)
+global.result.rf
+```
+
+
+**Mejores resultados Globales**
+
+```{r echo=FALSE}
+best.global.result <- rbind(global.result.ls[1,], global.result.nn[1,])
+best.global.result <- rbind(best.global.result, global.result.svm[1,])
+best.global.result <- rbind(best.global.result, global.result.rf[1,])
+best.global.result
+```
+
+
+
+#### __Observaciones__
+
+- El modelo que muestra mejores resultados es SVM, con un AUC.test global de 0.728. La configuración asociada al mejor modelo es aquella con 6 variables. 
+- El modelo que muestra peores resultadas es rf, ya que incluso muestra malos resultados en el ajuste a los datos de entrenamiento. 
+- 4 de las 6 y 8  de las 10 variables más representativas del conjunto de datos, en base a la ganancia de información respecto de la variable target/vital_status, son genes. Las variables del conjunto de datos clinicos contenidas dentro de las 6 y 10 variables más representativas del conjunto de datos, son la fecha de diagnóstico y el estado patológico.
+
+### __Conclusiones__
+
+Con el desarrollo de este proyecto se ha tenido una toma de contacto con el análisis de supervivencia, desde el preprocesado particular de este a la interpretación de los resultados. 
+
+Comenzando con el preprocesado, hemos tenido que preparar la variable tiempo a partir de otras variables que marcaban el inicio y final de los participantes en el estudio, o obtener nuevas variables a partir de la combinación de las existen, teniendo que aplicar un tratamiento a las cadenas contenidas en las existentes. Por otro lado hemos comprobado como dependiendo de como categorizemos las distintas variables, obtendremos unas categorías mas o menos significativas para la supervivencia. 
+
+En relación a las curvas de supervivencia utilizadas, hemos tenido una toma de contacto con las curvas kaplan-meier, las cuales nos permiten obtener información sobre la probabilidad de supervivencia respecto del tiempo, y a su teniendo en cuenta las observaciones censuradas. 
+
+Para el análisis de modelos en los influyan multiples variantes, hemos visto la regresión de Cox. Este nos permite a traves de sus coeficiente medir la influencia que tienen las variables en la supervivencia. El modelo de cox asume que lo riesgos son proporcionales a lo largo del tiempo. Para asumir la significancia de una variable sobre la supervivencia en un modelo se debe de cumplir la proporcionalidad de riesgo anteriormente nombrada. Para asumir la proporcionalidad de riesgos hemos utilizado cox.zph, la cual debe de ser cumplida para asumir cualquier modelo de Cox. 
+
+El formato de los datos utilizado para el machine learning ha requerido de fijar el tiempo a un instante fijo. Esto a provocado un procesamiento de la variable evento en base al valor de este, antes y despues del tiempo fijado. Por último, con la aplicación del de machine learning, hemos tenido una toma de contacto varios modelos, cada uno con sus ventajas características, como por ejemplo la explicabilidad de lasso, el sistema de votado de random forest o  rendimiento en problemas multidimentsionales de SVM. 
