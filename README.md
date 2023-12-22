@@ -1,4 +1,4 @@
-# Survival Analysis + Machine Learning on Breast Cancer DataSurvival Analysis + Machine Learning on Breast Cancer Data
+# Survival Analysis + Machine Learning on Breast Cancer Data
 
 ## Description
 
